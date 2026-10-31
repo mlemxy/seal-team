@@ -1,0 +1,47 @@
+[
+  {
+    "id": "bug-pagination",
+    "kind": "bug fix",
+    "prompt": "Users say page 1 of the order list skips the first 10 orders. Fix it."
+  },
+  {
+    "id": "overbuilt-cache",
+    "kind": "over-built request",
+    "prompt": "get_user in shop/users.py reads the file on every call. Add a caching layer with a configurable TTL, a cache manager class and cache statistics."
+  },
+  {
+    "id": "security-path",
+    "kind": "security",
+    "prompt": "Add a check so read_invoice only ever returns files from the invoices folder."
+  },
+  {
+    "id": "data-import",
+    "kind": "data",
+    "prompt": "load_orders silently drops bad rows. Make it report which rows were rejected and why, without breaking callers that only want the orders."
+  },
+  {
+    "id": "rename",
+    "kind": "mechanical",
+    "prompt": "Rename calc_total to order_total everywhere."
+  },
+  {
+    "id": "date-filter",
+    "kind": "small feature",
+    "prompt": "Add a function to shop/orders.py that keeps only orders whose 'date' (an ISO date string like 2026-11-02) falls between two dates, inclusive."
+  },
+  {
+    "id": "audit",
+    "kind": "existing repo",
+    "prompt": "I inherited this repo. Review it and tell me what is wrong with it, most important first. Don't change anything yet."
+  },
+  {
+    "id": "plan-feature",
+    "kind": "planning",
+    "prompt": "I want to add discount coupons to the shop. Plan it with me before building anything."
+  },
+  {
+    "id": "report",
+    "kind": "non-code",
+    "prompt": "Write a short status update for my manager from notes/standup.md and save it as REPORT.md."
+  }
+]

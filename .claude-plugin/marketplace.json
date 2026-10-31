@@ -1,0 +1,13 @@
+{
+  "name": "seal-team",
+  "owner": {
+    "name": "mlemxy"
+  },
+  "plugins": [
+    {
+      "name": "seal-team",
+      "source": "./"
+    }
+  ],
+  "description": "A seal team of expert agents for Claude Code"
+}
