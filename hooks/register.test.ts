@@ -63,6 +63,9 @@ test('the main session is briefed as Mochi, the lead seal', async ($, on) => {
   expect(team?.text).toContain('You are Mochi')
   expect(team?.text).toContain('load the `seal-team:playbook` skill first')
   expect(team?.text).toContain('pick `model` and `effort` by difficulty')
+  // Hand-offs need no permission from the user.
+  expect(team?.text).toContain('Delegate on your own, never asking the user first')
+  expect(team?.text).toContain('research goes to scout')
   expect(team?.text).toContain('Stop at the first rung that holds')
   expect(team?.text).toContain('one small test that fails without the change, even for a one-line fix')
   // The one stop that must hold even when the playbook is never loaded.
@@ -108,30 +111,49 @@ test('a permission prompt puts the seal in "needs you" until the call goes throu
     return { value: undefined }
   })
   on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent-7' }))
-  // The first check asks; once you approve, the call's own check allows it.
-  let checks = 0
-  on('tool.check', () => ({ decision: checks++ === 0 ? ('ask' as const) : ('allow' as const) }))
-  on('tool.call', () => ({ result: 'pushed' }))
+  on('classic.PermissionRequest', () => ({}) as never)
+  // The dialog is shown while the call waits; you approve it and the call goes through.
+  on('tool.call', async () => {
+    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'git push' }, agent_id: 'agent-7' } as never)
+    expect(statuses.at(-1)).toBe('🦭 Pebble needs you')
+    return { result: 'pushed' }
+  })
 
   await $.agent.spawn({ prompt: 'Push the branch', description: 'Push branch', subagentType: 'seal-team:pebble' } as never)
-  await $.tool.check({ tool: 'Bash', input: { command: 'git push' }, tool_use_id: 'tu-1', agentId: 'agent-7' } as never)
-  expect(statuses.at(-1)).toBe('🦭 Pebble needs you')
-  expect(toasts).toEqual(['🦭 Pebble needs your OK: Bash git push'])
-
   await $.tool.call({ tool: 'Bash', command: 'git push', agentId: 'agent-7' } as never)
+  expect(toasts).toEqual(['🦭 Pebble needs your OK: Bash git push'])
   expect(statuses.at(-1)).toBe('🦭 Pebble: Bash')
+})
+
+test('a command the permission check would ask about, but auto mode or a rule allows, never says "needs you"', async ($, on) => {
+  mock.clock(on)
+  mock.store(on)
+  const statuses: (string | undefined)[] = []
+  const toasts: string[] = []
+  on('ui.status', (_$, e) => {
+    statuses.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.toast', (_$, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent-8' }))
+  // The check's verdict is "ask"; the mode settles it, so no dialog (no PermissionRequest) follows.
+  on('tool.check', () => ({ decision: 'ask' as const }))
+
+  await $.agent.spawn({ prompt: 'Run the tests', description: 'Run tests', subagentType: 'seal-team:pebble' } as never)
+  await $.tool.check({ tool: 'Bash', input: { command: 'npm test' }, tool_use_id: 'tu-9', agentId: 'agent-8' } as never)
+  await $.tool.check({ tool: 'Bash', input: { command: 'ls' }, tool_use_id: 'tu-10' } as never)
+  expect(statuses.some(t => t?.includes('needs you'))).toBe(false)
+  expect(toasts).toEqual([])
 })
 
 test('a shell command shows only its program, never its arguments', async ($, on) => {
   mock.clock(on)
   mock.store(on)
-  const statuses: (string | undefined)[] = []
-  on('ui.status', (_$, e) => {
-    statuses.push(e.text)
-    return { value: undefined }
-  })
   on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent-9' }))
-  on('tool.check', () => ({ decision: 'ask' as const }))
+  on('classic.PermissionRequest', () => ({}) as never)
   const toasts: string[] = []
   on('ui.toast', (_$, e) => {
     toasts.push(e.text)
@@ -139,13 +161,12 @@ test('a shell command shows only its program, never its arguments', async ($, on
   })
 
   await $.agent.spawn({ prompt: 'Call the API', description: 'Call API', subagentType: 'seal-team:pebble' } as never)
-  await $.tool.check({
-    tool: 'Bash',
-    input: { command: 'curl -H "Authorization: Bearer sk-secret" https://api.example.com' },
-    tool_use_id: 'tu-2',
-    agentId: 'agent-9',
+  await $.classic.PermissionRequest({
+    tool_name: 'Bash',
+    tool_input: { command: 'curl -H "Authorization: Bearer sk-secret" https://api.example.com' },
+    agent_id: 'agent-9',
   } as never)
-  await $.tool.check({ tool: 'Bash', input: { command: 'API_KEY=sk-secret npm test' }, tool_use_id: 'tu-3', agentId: 'agent-9' } as never)
+  await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'API_KEY=sk-secret npm test' }, agent_id: 'agent-9' } as never)
 
   expect(toasts).toEqual(['🦭 Pebble needs your OK: Bash curl -H', '🦭 Pebble needs your OK: Bash npm test'])
   expect(toasts.join(' ')).not.toContain('sk-secret')
@@ -168,8 +189,8 @@ function files(on: Parameters<typeof mock.clock>[0], seed: Record<string, string
 
 test('a write to MEMORY.md that drops a pinned id is refused, unless ARCHIVE.md holds it', async ($, on) => {
   mock.clock(on)
-  const memory = '/p/.seal-team/MEMORY.md'
-  files(on, { [memory]: '## Pinned\n- D-1 Use Postgres\n- AC-2 Empty cart shows a hint\n', '/p/.seal-team/ARCHIVE.md': '- AC-9 old\n' })
+  const memory = '/p/seal-team/MEMORY.md'
+  files(on, { [memory]: '## Pinned\n- D-1 Use Postgres\n- AC-2 Empty cart shows a hint\n', '/p/seal-team/ARCHIVE.md': '- AC-9 old\n' })
   let wrote = 0
   on('tool.call', () => {
     wrote += 1
@@ -185,7 +206,7 @@ test('a write to MEMORY.md that drops a pinned id is refused, unless ARCHIVE.md 
   expect(wrote).toBe(2)
 })
 
-test('.seal-team/ is kept out of git unless the project chose to share it', async ($, on) => {
+test('seal-team/ is kept out of git unless the project chose to share it', async ($, on) => {
   mock.clock(on)
   mock.store(on)
   on('session.cwd', () => ({ value: '/p' }))
@@ -194,10 +215,10 @@ test('.seal-team/ is kept out of git unless the project chose to share it', asyn
   const fs = files(on, { '/p/.git/info/exclude': '# git ls-files --others --exclude-from=.git/info/exclude\n' })
 
   await $.session.start({ source: 'startup', cwd: '/p' } as never)
-  expect(fs['/p/.git/info/exclude']).toContain('.seal-team/\n')
+  expect(fs['/p/.git/info/exclude']).toContain('seal-team/\n')
 
   await $.session.start({ source: 'startup', cwd: '/p' } as never)
-  expect((fs['/p/.git/info/exclude'] ?? '').split('.seal-team/').length).toBe(2)
+  expect((fs['/p/.git/info/exclude'] ?? '').split('\nseal-team/').length).toBe(2)
 })
 
 test('the island page is refreshed every session, but three.js is copied only once', async ($, on) => {
@@ -253,4 +274,91 @@ test('subagent requests are held to Opus 5.5 at high effort; the main session is
   await drain($.turn.step({ turnId: 't0', index: 0, model: 'claude-fable-5-1', effort: 'max', messageCount: 1 } as never))
 
   expect(sent).toEqual([{ model: 'claude-opus-5-5', effort: 'high' }, { model: 'claude-fable-5-1', effort: 'max' }])
+})
+
+test('/seals opens the panel without a line saying so', async ($, on) => {
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+
+  const ran = await $.command.run({ command: 'seals', args: '' } as never)
+  expect(ran.text).toBe(undefined)
+})
+
+test('an ask typed on a seal in the island reaches Claude Code as a hand-off to that seal', async ($, on) => {
+  mock.clock(on)
+  mock.store(on)
+  on('session.cwd', () => ({ value: '/p' }))
+  on('env.get', () => ({ value: '/home' }))
+  on('fs.exists', () => ({ value: false }))
+  on('fs.read', () => ({ value: 'page' }))
+  on('fs.write', () => ({ value: undefined }))
+  const opened: string[] = []
+  on('process.run', (_$, e) => {
+    opened.push(e.argv.at(-1) as string)
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  let started: readonly string[] = []
+  on('process.spawn', async function* (_$, e) {
+    started = e.argv
+    const secret = e.argv.at(-1)
+    yield { stream: 'stdout' as const, text: '{"port":4321}\n{"seal":"scout","te' }
+    yield { stream: 'stdout' as const, text: 'xt":"Find 3 agent dashboards"}\n{"seal":"nobody","text":"hi"}\n' }
+    expect(secret).toMatch(/^[0-9a-f]{32}$/)
+    return { code: 0, signal: null }
+  })
+  const submitted: { text: string; asUser?: boolean }[] = []
+  let got: () => void = () => undefined
+  const arrived = new Promise<void>(r => (got = r))
+  on('prompt.submit', (_$, e) => {
+    submitted.push({ text: e.text, asUser: (e.origin as { asUser?: boolean }).asUser })
+    got()
+    return {} as never
+  })
+
+  const ran = await $.command.run({ command: 'seal-island', args: '' } as never)
+  await arrived
+  expect(started[0]).toBe('python3')
+  expect(started[1]).toMatch(/\/island\/serve\.py$/)
+  expect(started.at(-2)).toBe('/home/.seal-team/islands/p')
+  expect(ran.text).toMatch(/^Seal island: http:\/\/127\.0\.0\.1:4321\/[0-9a-f]{32}\/$/)
+  expect(opened.at(-1)).toBe((ran.text ?? '').replace('Seal island: ', ''))
+  // Only known seals: the ask for "nobody" is dropped.
+  expect(submitted.length).toBe(1)
+  expect(submitted[0]?.asUser).toBe(true)
+  expect(submitted[0]?.text).toContain('Hand this to Scout with the Agent tool (`seal-team:scout`)')
+  expect(submitted[0]?.text).toContain('Find 3 agent dashboards')
+})
+
+test("an earlier version's hidden .seal-team/ moves to the visible seal-team/", async ($, on) => {
+  mock.clock(on)
+  mock.store(on)
+  on('session.cwd', () => ({ value: '/p' }))
+  on('command.register', () => ({ value: undefined }) as never)
+  on('session.start', (_$, e) => ({ ...(e as object) }) as never)
+  const toasts: string[] = []
+  on('ui.toast', (_$, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  const fs = files(on, { '/p/.seal-team/PRD.md': '# PRD', '/p/.git/info/exclude': '' })
+  const runs: string[][] = []
+  on('process.run', (_$, e) => {
+    runs.push([...e.argv])
+    if (e.argv[0] === 'mv') {
+      for (const k of Object.keys(fs)) if (k.startsWith('/p/.seal-team/')) {
+        fs[k.replace('/p/.seal-team/', '/p/seal-team/')] = fs[k] as string
+        delete fs[k]
+      }
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+
+  await $.session.start({ source: 'startup', cwd: '/p' } as never)
+  expect(runs).toContainEqual(['mv', '/p/.seal-team', '/p/seal-team'])
+  expect(fs['/p/seal-team/PRD.md']).toBe('# PRD')
+  expect(toasts).toContain("🦭 The team's files moved to seal-team/ so you can see them.")
+
+  // Once moved, nothing moves again.
+  runs.length = 0
+  await $.session.start({ source: 'startup', cwd: '/p' } as never)
+  expect(runs.some(r => r[0] === 'mv')).toBe(false)
 })
