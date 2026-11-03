@@ -2,7 +2,12 @@
 
 const PINNED_ID = /\b(?:AC|D|R|Q|C|P)-\d+\b/g
 
-export const MEMORY_DIR = '.seal-team'
+// Visible on purpose: the PRD, plans and reports are for the user to read, and a dot-folder hides them.
+export const MEMORY_DIR = 'seal-team'
+// Earlier versions' project folder, moved to MEMORY_DIR on the next session start.
+export const OLD_MEMORY_DIR = '.seal-team'
+// Settings across projects stay out of sight in the home folder.
+export const HOME_DIR = '.seal-team'
 // About 1,500 tokens of memory and 500 of preferences on every request.
 export const MEMORY_CHARS = 6000
 export const PREFERENCES_CHARS = 2000

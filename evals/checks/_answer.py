@@ -10,6 +10,6 @@ def answer():
 
 
 def code_changed():
-    """Whether anything outside .seal-team/ and the answer file changed."""
+    """Whether anything outside seal-team/ and the answer file changed."""
     out = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=WORK, capture_output=True, text=True).stdout
-    return any(not (line[3:].startswith(".seal-team/") or line[3:] == ".eval-answer.txt") for line in out.splitlines())
+    return any(not (line[3:].startswith("seal-team/") or line[3:] == ".eval-answer.txt") for line in out.splitlines())

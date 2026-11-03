@@ -30,7 +30,7 @@ Seal Team turns your Claude Code session into a lead, **Mochi**, who works with 
 | **Proof of done** | Bug fixes and risky changes (branches, parsers, money, security, data writes) ship with a test that fails without the change. |
 | **Hard stops** | Seal Team stops for your approval after an audit, after the PRD, after the plan, and before anything is deployed, published, pushed or deleted. |
 | **Durable project memory** | Decisions, acceptance criteria, risks and open questions are pinned in `MEMORY.md` and added to every request. A guard refuses any edit that drops a pinned item. |
-| **Right-sized models** | Mochi picks the model and effort for each task. Subagents are capped at Claude Opus 5.5 and `high` effort. |
+| **Right-sized models** | Mochi hands work to a seal or a cheaper model on its own, without asking you, and picks the model and effort for each task. Subagents are capped at Claude Opus 5.5 and `high` effort. |
 | **Live visibility** | A status line, notifications when a seal needs you, a `/seals` panel with per-agent token use, and an optional 3D view of the team at work. |
 
 ## Installation
@@ -51,7 +51,7 @@ claude plugin update seal-team@seal-team
 
 Restart Claude Code after installing or updating.
 
-**Optional:** sharing the 3D view with another device requires macOS and `python3`.
+**Optional:** giving seals work from the 3D view requires `python3`. Without it the view still opens, to watch only.
 
 ## Getting started
 
@@ -63,7 +63,7 @@ Describe what you want in plain language. Mochi chooses the path:
 | An existing or half-built repository | A short intake, then an assessment in `ASSESSMENT.md`. **Stops for you to choose what to fix.** |
 | A change to review | Bolt reviews it, bringing in Brick, Krill or Sprinkle when the change touches security, data or UI |
 | A small fix | Build, review, then the ship stop |
-| Research, writing or a decision to think through | A thinking partner, with no stages |
+| Research, writing or a decision to think through | Mochi talks it over with you while Scout checks the facts and Nori or Bolt draft the plan, with no stages |
 
 You can also address a specialist directly, for example: *"Have Brick check the login form."*
 
@@ -84,7 +84,7 @@ At every stop, Quill writes a five-line stage card (stage, done, next, needs you
 
 ### Project files
 
-Project files live in `.seal-team/` at the repository root. By default they are excluded from git through `.git/info/exclude`, so they are never committed by accident. On first use, Mochi asks whether you want to commit them for your team instead, and warns that they contain plans, notes and security findings that anyone can read if the repository is public.
+Project files live in `seal-team/` at the repository root. By default they are excluded from git through `.git/info/exclude`, so they are never committed by accident. On first use, Mochi asks whether you want to commit them for your team instead, and warns that they contain plans, notes and security findings that anyone can read if the repository is public.
 
 Personal preferences that apply across projects are stored in `~/.seal-team/preferences.md`.
 
@@ -113,9 +113,7 @@ Defaults are starting points. Mochi moves an agent up or down a tier for a singl
 | Command | Description |
 |---|---|
 | `/seals` | Panel showing each agent's model, current task, tokens used and completed tasks |
-| `/seal-island` | Opens the live 3D view for the current project in your browser |
-| `/seal-island ipad` | Shares the 3D view with a phone or tablet on your local network or Tailscale (macOS) |
-| `/seal-island stop` | Stops sharing and invalidates the link |
+| `/seal-island` | Opens the live 3D view for the current project in your browser. Type on a seal's card to give it work: the ask arrives in Claude Code and Mochi hands it to that seal |
 
 ## Cost and quality
 
@@ -133,9 +131,9 @@ On these small tasks, the extra cost is the brief and the tests Seal Team writes
 ## Privacy and safety
 
 - **Approval required** for deploying, publishing, pushing, sending or deleting anything.
-- **No network calls** from the plugin. The 3D view reads a local file, and three.js is bundled so it works offline.
+- **No network calls** from the plugin. The 3D view is served by a small server on `127.0.0.1` only, reachable from this computer alone, and three.js is bundled so it works offline.
 - **Redacted commands.** Shell commands appear in the status line, panel and 3D view as the program and subcommand only (for example `git push`), never with arguments, so tokens in a command line are not displayed.
-- **Device sharing** serves the 3D view on your network behind a random secret in the link. Anyone with the link can view it; `/seal-island stop` invalidates it.
+- **Asks from the 3D view** are accepted only from the page itself: a new secret in the link each session, and a same-origin JSON request, so another website open in your browser cannot send work to Claude Code.
 - **Calendar access** is used only after you agree.
 
 ## Development
@@ -148,7 +146,7 @@ On these small tasks, the extra cost is the brief and the tests Seal Team writes
 | `hooks/register.tsx` | The plugin runtime: model cap, agent tracking, panel, status line, memory guard, 3D view feed |
 | `hooks/memory.ts` | Memory guard logic for pinned items in `MEMORY.md` |
 | `hooks/register.test.ts` | Tests |
-| `island/` | The 3D view and bundled three.js |
+| `island/` | The 3D view, its local server (`serve.py`) and bundled three.js |
 | `evals/` | Evaluation tasks, hidden checks and runner |
 
 ```bash
