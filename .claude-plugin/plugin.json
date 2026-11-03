@@ -1,6 +1,6 @@
 {
   "name": "seal-team",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "A team of 13 expert seal agents for Claude Code: each task runs on the cheapest model that can do it, nothing above Opus 5.5, a team panel, and a live 3D island.",
   "types": "./types/index.d.ts",
   "author": {

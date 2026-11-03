@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { SealEvent, SealLive } from '../types'
 import { TEAM_SECTION } from './brief'
-import { afterEdit, clip, droppedIds, MEMORY_CHARS, MEMORY_DIR, PREFERENCES_CHARS } from './memory'
+import { afterEdit, clip, droppedIds, HOME_DIR, MEMORY_CHARS, MEMORY_DIR, OLD_MEMORY_DIR, PREFERENCES_CHARS } from './memory'
 
 type Seal = { id: string; name: string; role: string; model: string }
 
@@ -98,6 +98,8 @@ let writeQueued = false
 let islandDir: string | undefined
 let project = ''
 let warnedSessionModel = false
+// The seals whose call waits on a permission dialog, and what it asks.
+const waitingOn = new Map<string, string>()
 
 async function setSeal($: EngineInterface, id: string, patch: Partial<SealLive>) {
   await update($, seals, m => ({ ...m, [id]: { ...blank(), ...(m[id] ?? {}), ...patch } }))
@@ -156,73 +158,77 @@ async function prepareIsland($: EngineInterface): Promise<string | undefined> {
   return dir
 }
 
-// Sharing the island with other devices on the same Wi-Fi: a small web server on this computer,
-// behind a random path so only someone with the link can open it.
-const SHARE_PORT = 8787
+// The island's own server on this computer (127.0.0.1 only, behind a secret path): it serves the
+// page and passes back what you type on a seal's card, which becomes a prompt here.
+const MAX_ASK = 4000
+let islandUrl: string | undefined
+let islandServer: Promise<string | undefined> | undefined
 
-async function shareRoot($: EngineInterface): Promise<{ www: string; token: string } | undefined> {
-  const home = await $.env.get('HOME')
-  if (!home) return undefined
-  let token = (await $.store.get('shareToken')) as string | undefined
-  if (!token) {
-    const bytes = crypto.getRandomValues(new Uint8Array(12))
-    token = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
-    await $.store.set('shareToken', token)
-  }
-  return { www: `${home}/.seal-team/www`, token }
+// What an ask typed on the island says to Mochi: as it is for Mochi, a hand-off for any other seal.
+function askPrompt(seal: string, text: string): string | undefined {
+  const t = text.trim().slice(0, MAX_ASK)
+  const s = BY_ID.get(seal)
+  if (t === '' || s === undefined) return undefined
+  if (s.id === 'mochi') return `(Asked on the seal island) ${t}`
+  return `(Asked on the seal island, for ${s.name}) Hand this to ${s.name} with the Agent tool (\`${AGENT_PREFIX}${s.id}\`), briefed as usual: ${t}`
 }
 
-async function shareIsland($: EngineInterface): Promise<string> {
-  const root = await shareRoot($)
-  const home = await $.env.get('HOME')
-  if (!root || !home) return 'Could not find your home folder to share the island.'
-  const { www, token } = root
-  // A blank page at the top so the server never lists the secret folder.
-  await $.fs.write(`${www}/index.html`, '<!doctype html><title>Nothing here</title>')
-  await $.process.run(['ln', '-sfn', `${home}/.seal-team/islands`, `${www}/${token}`])
-  const running = await $.process.run(['sh', '-c', `pgrep -f "http.server ${SHARE_PORT} --bind 0.0.0.0" >/dev/null`])
-  if (running.exitCode !== 0) {
-    const started = await $.process.run([
-      'sh',
-      '-c',
-      `command -v python3 >/dev/null || exit 3; nohup python3 -m http.server ${SHARE_PORT} --bind 0.0.0.0 --directory "$1" >/dev/null 2>&1 &`,
-      'sh',
-      www,
-    ])
-    if (started.exitCode === 3) return 'Sharing needs python3, which this computer does not have. Install the Xcode command line tools (xcode-select --install) and try again.'
+function onServerLine($: EngineInterface, line: string, secret: string, ready: (url: string) => void) {
+  let msg: { port?: unknown; seal?: unknown; text?: unknown }
+  try {
+    msg = JSON.parse(line)
+  } catch {
+    return
   }
-  const host = (await $.process.run(['scutil', '--get', 'LocalHostName']).catch(() => ({ stdout: '' }))).stdout.trim()
-  let ip = ''
-  for (const iface of ['en0', 'en1']) {
-    ip = (await $.process.run(['ipconfig', 'getifaddr', iface]).catch(() => ({ stdout: '' }))).stdout.trim()
-    if (ip) break
-  }
-  // Tailscale joins this computer and your iPad privately, so the island opens from anywhere (work included).
-  const tailscale = await $.process
-    .run(['sh', '-c', 'T=$(command -v tailscale || echo /Applications/Tailscale.app/Contents/MacOS/Tailscale); "$T" ip -4 2>/dev/null | head -1'])
-    .catch(() => ({ stdout: '' }))
-  const tsIp = tailscale.stdout.trim()
-  const path = `/${token}/${islandDir?.split('/').pop() ?? ''}/`
-  const links = [host ? `http://${host}.local:${SHARE_PORT}${path}` : '', ip ? `http://${ip}:${SHARE_PORT}${path}` : ''].filter(Boolean)
-  if (links.length === 0 && !tsIp) return `Sharing on port ${SHARE_PORT}, but this computer's network address wasn't found. Is Wi-Fi on?`
-
-  return [
-    ...(tsIp ? ['From anywhere, on a device signed in to your Tailscale:', `  http://${tsIp}:${SHARE_PORT}${path}`] : ['Away from home? Install Tailscale on this computer and your iPad, then run /seal-island ipad again for a link that works anywhere.']),
-    ...(links.length ? ['On the same Wi-Fi as this computer:', ...links.map(l => '  ' + l)] : []),
-    'Keep the link to yourself: anyone on this network who has it can watch. Stop sharing with /seal-island stop.',
-    'If macOS asks whether Python may accept incoming connections, choose Allow.',
-  ].join('\n')
+  if (typeof msg.port === 'number') return ready(`http://127.0.0.1:${msg.port}/${secret}/`)
+  if (typeof msg.seal !== 'string' || typeof msg.text !== 'string') return
+  const text = askPrompt(msg.seal, msg.text)
+  if (text === undefined) return
+  void $.prompt.submit({ text, asUser: true }).catch(() => $.ui.toast('🦭 Could not pass on the ask from the island.'))
 }
 
-async function stopSharing($: EngineInterface): Promise<string> {
-  const r = await $.process.run(['sh', '-c', `pkill -f "http.server ${SHARE_PORT} --bind 0.0.0.0"`])
-  // A new secret next time, so an old link stops working for good.
-  const home = await $.env.get('HOME')
-  const token = (await $.store.get('shareToken')) as string | undefined
-  if (home && token) await $.process.run(['rm', '-f', `${home}/.seal-team/www/${token}`])
-  await $.store.set('shareToken', '')
+// Starts the server once per session; resolves with the island's address, or undefined without python3.
+function startIslandServer($: EngineInterface, dir: string): Promise<string | undefined> {
+  if (islandServer !== undefined) return islandServer
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  const secret = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+  islandServer = new Promise(resolve => {
+    $.clock.after(5000, () => resolve(islandUrl))
+    void (async () => {
+      try {
+        const child = $.process.spawn({ argv: ['python3', `${$.plugin.root}/island/serve.py`, dir, secret] })
+        let buf = ''
+        for await (const { stream, text } of child) {
+          if (stream !== 'stdout') continue
+          buf += text
+          let nl: number
+          while ((nl = buf.indexOf('\n')) >= 0) {
+            const line = buf.slice(0, nl)
+            buf = buf.slice(nl + 1)
+            onServerLine($, line, secret, url => {
+              islandUrl = url
+              resolve(url)
+            })
+          }
+        }
+      } catch {
+        // No python3, or the server could not start: the island still opens from disk, view only.
+      }
+      islandUrl = undefined
+      islandServer = undefined
+      resolve(undefined)
+    })()
+  })
+  return islandServer
+}
 
-  return r.exitCode === 0 ? 'Stopped sharing the seal island.' : 'The seal island was not being shared.'
+// Earlier versions could share the island on the network; that is gone, so stop any server they left.
+async function removeOldSharing($: EngineInterface): Promise<void> {
+  if (await $.store.get('sharingRemoved')) return
+  const home = await $.env.get('HOME')
+  await $.process.run(['pkill', '-f', 'http.server 8787 --bind 0.0.0.0']).catch(() => undefined)
+  if (home) await $.process.run(['rm', '-rf', `${home}/.seal-team/www`]).catch(() => undefined)
+  await $.store.set('sharingRemoved', true)
 }
 
 async function readOr($: EngineInterface, path: string, fallback = ''): Promise<string> {
@@ -233,7 +239,15 @@ async function readOr($: EngineInterface, path: string, fallback = ''): Promise<
   }
 }
 
-// Keeps .seal-team/ out of git through the repo's local exclude file, unless the user chose to share it.
+// Moves an earlier version's hidden .seal-team/ to the visible seal-team/, unless that already exists.
+async function moveOldFolder($: EngineInterface, cwd: string): Promise<void> {
+  const [old, now] = [`${cwd}/${OLD_MEMORY_DIR}`, `${cwd}/${MEMORY_DIR}`]
+  if (!(await $.fs.exists(old)) || (await $.fs.exists(now))) return
+  const moved = await $.process.run(['mv', old, now])
+  if (moved.exitCode === 0) $.ui.toast(`🦭 The team's files moved to ${MEMORY_DIR}/ so you can see them.`)
+}
+
+// Keeps seal-team/ out of git through the repo's local exclude file, unless the user chose to share it.
 async function keepLocal($: EngineInterface, cwd: string): Promise<void> {
   const exclude = `${cwd}/.git/info/exclude`
   if (!(await $.fs.exists(`${cwd}/.git/info`)) || (await $.fs.exists(`${cwd}/${MEMORY_DIR}/SHARED`))) return
@@ -247,14 +261,14 @@ async function memorySection($: EngineInterface): Promise<{ id: string; scope: '
   const [home, cwd] = await Promise.all([$.env.get('HOME'), $.session.cwd()])
   const [rawMemory, rawPreferences] = await Promise.all([
     readOr($, `${cwd}/${MEMORY_DIR}/MEMORY.md`),
-    home ? readOr($, `${home}/${MEMORY_DIR}/preferences.md`) : '',
+    home ? readOr($, `${home}/${HOME_DIR}/preferences.md`) : '',
   ])
   const memory = clip(rawMemory, MEMORY_CHARS)
   const preferences = clip(rawPreferences, PREFERENCES_CHARS)
   if (memory === '' && preferences === '') return undefined
   const parts = ['# Seal team memory']
   if (preferences !== '') parts.push("## The user's preferences (~/.seal-team/preferences.md)", preferences)
-  if (memory !== '') parts.push('## This project (.seal-team/MEMORY.md)', memory)
+  if (memory !== '') parts.push('## This project (seal-team/MEMORY.md)', memory)
   return { id: 'seal-team:memory', scope: 'session', text: parts.join('\n') }
 }
 
@@ -269,7 +283,9 @@ export const register: Register = on => {
       return fresh
     })
     try {
-      await keepLocal($, await $.session.cwd())
+      const cwd = await $.session.cwd()
+      await moveOldFolder($, cwd)
+      await keepLocal($, cwd)
     } catch {
       // Not a git repo, or no permission: nothing to keep out.
     }
@@ -279,6 +295,7 @@ export const register: Register = on => {
     } catch {
       islandDir = undefined
     }
+    await removeOldSharing($).catch(() => undefined)
 
     return next(e)
   })
@@ -319,22 +336,22 @@ export const register: Register = on => {
     return ran
   })
 
-  // A permission prompt: the seal waves on the island until you answer it in Claude Code.
-  on('tool.check', async ($, e, next) => {
-    const verdict = await next(e)
-    if (verdict.decision === 'ask' && e.tool_use_id !== undefined) {
-      const id = await sealOfLoop($, e.agentId)
-      if (id !== undefined) {
-        const target = targetOf((e.input ?? {}) as Record<string, unknown>)
-        const ask = `${e.tool}${target ? ' ' + target : ''}`
-        await setSeal($, id, { status: 'waiting', ask, tool: e.tool, target })
-        await logEvent($, id, 'ASK', `Wants to run ${ask}`)
-        if (id !== 'mochi') $.ui.toast(`🦭 ${BY_ID.get(id)?.name} needs your OK: ${ask}`)
-        await refresh($)
-      }
+  // A permission dialog actually put to you: the seal waves on the island until you answer it.
+  // Not `tool.check`: its "ask" comes before auto mode and your allow rules settle the call,
+  // so most of those never reach you.
+  on('classic.PermissionRequest', async ($, e, next) => {
+    const id = await sealOfLoop($, e.agent_id)
+    if (id !== undefined) {
+      const target = targetOf((e.tool_input ?? {}) as Record<string, unknown>)
+      const ask = `${e.tool_name}${target ? ' ' + target : ''}`
+      waitingOn.set(id, ask)
+      await setSeal($, id, { status: 'waiting', ask, tool: e.tool_name, target })
+      await logEvent($, id, 'ASK', `Wants to run ${ask}`)
+      if (id !== 'mochi') $.ui.toast(`🦭 ${BY_ID.get(id)?.name} needs your OK: ${ask}`)
+      await refresh($)
     }
 
-    return verdict
+    return next(e)
   }).catch(($, e, next) => next(e))
 
   // Every subagent request: hold it to the ceiling, and count the tokens it used against its seal.
@@ -373,7 +390,6 @@ export const register: Register = on => {
   on('tool.call', async ($, e, next) => {
     const id = await sealOfLoop($, e.agentId)
     const tracked = id !== undefined && e.tool !== 'Agent'
-    const was = tracked ? (await read($, seals))[id] : undefined
     if (tracked) {
       const target = targetOf(e as unknown as Record<string, unknown>)
       await setSeal($, id, { status: 'working', tool: String(e.tool), target, ask: '' })
@@ -381,11 +397,13 @@ export const register: Register = on => {
       await refresh($)
     }
     const ran = await next(e)
-    if (tracked) {
-      if (was?.status === 'waiting') {
-        await logEvent($, id, ran.deny === undefined ? 'OK' : 'STOP', `${ran.deny === undefined ? 'Allowed' : 'Not allowed'}: ${was.ask}`)
-        await refresh($)
-      }
+    // You were asked while the call waited (PermissionRequest above): log your answer.
+    const asked = tracked ? waitingOn.get(id) : undefined
+    if (tracked && asked !== undefined) {
+      waitingOn.delete(id)
+      await setSeal($, id, { status: 'working', ask: '' })
+      await logEvent($, id, ran.deny === undefined ? 'OK' : 'STOP', `${ran.deny === undefined ? 'Allowed' : 'Not allowed'}: ${asked}`)
+      await refresh($)
     }
 
     return ran
@@ -431,27 +449,26 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // The panel is the answer; a line saying it opened is noise.
   on('command.run', { command: 'seals' }, async $ => {
-    await $.ui.open({ id: PANE, title: 'Seal team' })
+    const opened = await $.ui.open({ id: PANE, title: 'Seal team' })
 
-    return { text: 'Seal team panel opened.' }
+    return opened.isPlaced ? {} : { text: `The seal panel can't be shown here: ${opened.reason}` }
   })
 
-  on('command.run', { command: 'seal-island' }, async ($, e) => {
+  on('command.run', { command: 'seal-island' }, async $ => {
     if (islandDir === undefined) islandDir = await prepareIsland($)
     if (islandDir === undefined) return { text: 'Could not find your home folder to set up the island.' }
     await writeLive($)
-    const mode = e.args.trim().toLowerCase()
-    if (mode === 'ipad' || mode === 'share') return { text: await shareIsland($) }
-    if (mode === 'stop') return { text: await stopSharing($) }
-    const page = `${islandDir}/index.html`
+    const url = await startIslandServer($, islandDir)
+    const page = url ?? `file://${islandDir}/index.html`
     try {
-      await $.process.run([page.startsWith('/Users/') ? 'open' : 'xdg-open', page])
+      await $.process.run([islandDir.startsWith('/Users/') ? 'open' : 'xdg-open', page])
     } catch {
-      // Opening is a convenience; the path below still works.
+      // Opening is a convenience; the link below still works.
     }
 
-    return { text: `Seal island: file://${page}\nTo watch it on your iPad or phone: /seal-island ipad` }
+    return { text: url ? `Seal island: ${url}` : `Seal island: ${page}\nTo give seals work from the island, install python3 and run /seal-island again.` }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

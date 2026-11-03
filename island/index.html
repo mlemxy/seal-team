@@ -846,6 +846,8 @@ function route(a, b, depth) {
 /* ---------------- sim (demo) ---------------- */
 let paused = false;
 let liveMode = false;
+// Served by the mod's local server (not opened from disk): asks typed here reach Claude Code.
+const canAsk = location.protocol === 'http:' && location.hostname === '127.0.0.1';
 let selected = null, liveDirty = false, liveEl = null, boardDirty = true;
 const logList = $('#logList');
 function log(s, tool, text, proj, when) {
@@ -1102,7 +1104,7 @@ function applyLive(data) {
   liveDirty = true;
 }
 window.__onSealLive = applyLive;
-// Opened from disk or from the shared link: read the mod's live.js beside the page.
+// Read the mod's live.js beside the page.
 (function pollLive() {
   const poll = () => {
     const el = document.createElement('script');
@@ -1161,9 +1163,9 @@ function select(s) {
     '<div><p class="lbl">Owns</p><div class="chips">' + d.owns.map(o => '<span>' + esc(o) + '</span>').join('') + '</div></div>' +
     '<div><p class="lbl">Tools</p><div class="chips tools">' + d.tools.map(o => '<span>' + esc(o) + '</span>').join('') + '</div></div>' +
     '<div id="live"></div>' +
-    (liveMode
-      ? '<p class="job" style="color:var(--cocoa-soft);font-size:12.5px">To give ' + esc(d.name) + ' work, ask in Claude Code' + (d.id === 'mochi' ? '.' : ' (or tell Mochi to hand it over).') + '</p>'
-      : '<form class="msg" autocomplete="off"><input id="msgInput" type="text" placeholder="Message ' + esc(d.name) + '…" aria-label="Message ' + esc(d.name) + '"><button class="btn" type="submit">Send</button></form>');
+    (liveMode && !canAsk
+      ? '<p class="job" style="color:var(--cocoa-soft);font-size:12.5px">Open the island with /seal-island to give ' + esc(d.name) + ' work from here.</p>'
+      : '<form class="msg" autocomplete="off"><input id="msgInput" type="text" maxlength="4000" placeholder="' + (liveMode ? 'Ask ' : 'Message ') + esc(d.name) + '…" aria-label="' + (liveMode ? 'Ask ' : 'Message ') + esc(d.name) + '"><button class="btn" type="submit">Send</button></form><p class="job" id="askNote" role="status" style="color:var(--cocoa-soft);font-size:12.5px" hidden></p>');
   liveEl = card.querySelector('#live');
   card.querySelector('.x').addEventListener('click', deselect);
   const form = card.querySelector('form');
@@ -1171,6 +1173,7 @@ function select(s) {
     e.preventDefault();
     const inp = card.querySelector('#msgInput'); const v = inp.value.trim(); if (!v) return;
     inp.value = '';
+    if (liveMode) { sendAsk(s, v, inp); return; }
     log(null, 'CHAT', 'To ' + d.name + ': ' + v, null);
     s.say = {text:'On it!', until:performance.now() + 3200};
     s.bounce = 1; s.bounceT = 0;
@@ -1179,6 +1182,22 @@ function select(s) {
   liveDirty = true; renderLive();
   seals.forEach(o => o.tag.classList.toggle('sel', o === s));
   matePills.forEach(m => m.b.setAttribute('aria-current', m.s === s ? 'true' : 'false'));
+}
+// Live: the ask goes to Claude Code through the mod's local server; Mochi hands it to the seal.
+async function sendAsk(s, text, inp) {
+  const note = card.querySelector('#askNote');
+  const say = msg => { if (note && selected === s) { note.textContent = msg; note.hidden = false; } };
+  try {
+    const r = await fetch('ask', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({seal:s.def.id, text})});
+    if (!r.ok) throw new Error(String(r.status));
+    log(null, 'CHAT', 'To ' + s.def.name + ': ' + text, null);
+    s.say = {text:'On it!', until:performance.now() + 3200};
+    s.bounce = 1; s.bounceT = 0;
+    say(s.def.id === 'mochi' ? 'Sent to Claude Code.' : 'Sent. Mochi is handing it to ' + s.def.name + '.');
+  } catch (err) {
+    if (inp && !inp.value) inp.value = text;
+    say('Could not reach Claude Code. Is the session still open? Run /seal-island there for a fresh link.');
+  }
 }
 function deselect() {
   selected = null; card.hidden = true; card.innerHTML = ''; liveEl = null;
